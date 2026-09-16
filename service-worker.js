@@ -1,5 +1,5 @@
 /* DDC Consent — offline service worker (cache-first app shell) */
-var CACHE = "ddc-consent-v10";
+var CACHE = "ddc-consent-v12";
 var ASSETS = [
   "./", "index.html", "manifest.webmanifest",
   "apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon-512-maskable.png"

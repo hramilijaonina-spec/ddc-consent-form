@@ -1,7 +1,7 @@
 /* DDC Consent — offline service worker (cache-first app shell) */
-var CACHE = "ddc-consent-v12";
+var CACHE = "ddc-consent-v13";
 var ASSETS = [
-  "./", "index.html", "manifest.webmanifest",
+  "./", "index.html", "manifest.webmanifest", "qrcode.js",
   "apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon-512-maskable.png"
 ];
 self.addEventListener("install", function(e){

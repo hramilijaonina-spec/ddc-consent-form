@@ -209,12 +209,25 @@ window.addEventListener("error",function(e){try{if(!e||!e.message||e.message.ind
 <div class="modal" id="settingsModal"><div class="sheet">
   <h2 data-i="settings">Settings</h2>
   <p class="sub" data-i="settingsSub">These values fill the consent text and the document header.</p>
-  <label data-i="sProject">Project / organisation using the images</label>
+  <label data-i="sProject">Nom du projet</label>
   <input type="text" id="s_project" />
   <label data-i="sProducer">Production company (credit)</label>
   <input type="text" id="s_producer" />
   <label data-i="sRef">Reference prefix</label>
   <input type="text" id="s_ref" />
+
+  <label data-i="sContract">Texte du contrat</label>
+  <div class="hint" data-i="sContractHint" style="margin:0 0 6px">Modify the text below. A line starting with « # » is a section title, a blank line starts a new paragraph, and « DECLARATION: » marks the final declaration. Use {PROJECT} where the project name should appear.</div>
+  <textarea id="s_contract" style="min-height:220px"></textarea>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0 0">
+    <label class="btn ghost" for="tplInput" style="margin:0">📄 <span data-i="importTpl">Import a template (.txt / .md)</span></label>
+    <input type="file" id="tplInput" accept=".txt,.md,text/plain,text/markdown,.markdown" style="display:none" />
+    <button class="btn ghost" id="btnResetContract" type="button" data-i="resetContract" style="margin:0">Default text</button>
+  </div>
+  <label data-i="oldName" style="margin-top:10px">Old name to replace (optional)</label>
+  <input type="text" id="s_oldname" placeholder="e.g. RTSL ETDH" />
+  <div class="hint" data-i="oldNameHint" style="margin:4px 0 0">On import (or on save), this name is replaced by {PROJECT} so the contract stays dynamic.</div>
+
   <div class="actions">
     <button class="btn ghost" id="btnCancelSettings" type="button" data-i="cancel">Cancel</button>
     <button class="btn primary" style="flex:1" id="btnSaveSettings" type="button" data-i="save">Save</button>
@@ -676,7 +689,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
     // Consent sections
     for(var si=0;si<d.sections.length;si++){
-      heading(d.sections[si].h);
+      if(d.sections[si].h) heading(d.sections[si].h);
       for(var p=0;p<d.sections[si].body.length;p++){ para(d.sections[si].body[p]); }
     }
 
@@ -864,6 +877,67 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     };
   }
 
+  /* -- generic contract model + serialize / parse ---------------------
+     model = { sections:[ {h:"title", body:["para", ...]}, ... ], decl:"..." }
+     Serialized (editable / importable) text convention:
+       "# Title"           -> a section heading
+       blank line          -> paragraph break
+       "DECLARATION:"      -> everything after is the final declaration
+     {PROJECT} / {PRODUCER} placeholders are substituted at render / PDF time. */
+  function defModel(lang){
+    var tx=defTexts(lang);
+    return { sections:[
+        {h:tx.s1h, body:tx.s1.slice()},
+        {h:tx.s2h, body:tx.s2.slice()},
+        {h:tx.s3h, body:tx.s3.slice()},
+        {h:tx.s4h, body:tx.s4.slice()},
+        {h:tx.s5h, body:tx.s5.slice()}
+      ], decl:tx.decl };
+  }
+  function legacyToModel(lang){
+    // migrate an older per-field saved text (cf_texts_<lang>) into the model
+    var tx=assign(assign({},defTexts(lang)), sget("cf_texts_"+lang,{}));
+    function arr(k){ var a=tx[k]; return (a&&a.length!=null)?a.slice():[]; }
+    return { sections:[
+        {h:tx.s1h||"", body:arr("s1")},
+        {h:tx.s2h||"", body:arr("s2")},
+        {h:tx.s3h||"", body:arr("s3")},
+        {h:tx.s4h||"", body:arr("s4")},
+        {h:tx.s5h||"", body:arr("s5")}
+      ], decl:tx.decl||"" };
+  }
+  var DECL_RE=/^\s*(d[ée]claration)\s*:?\s*(.*)$/i;
+  function parseContract(text){
+    var lines=String(text==null?"":text).replace(/\r\n/g,"\n").replace(/\r/g,"\n").split("\n");
+    var sections=[], cur=null, buf=[], declBuf=[], inDecl=false;
+    function flushPara(){ if(cur){ var p=buf.join(" ").replace(/\s+/g," ").trim(); if(p) cur.body.push(p); } buf=[]; }
+    function flushSection(){ flushPara(); if(cur){ sections.push(cur); cur=null; } }
+    for(var i=0;i<lines.length;i++){
+      var line=lines[i].trim();
+      if(inDecl){ if(line) declBuf.push(line); continue; }
+      var dm=line.match(DECL_RE);
+      if(dm){ flushSection(); inDecl=true; if(dm[2]) declBuf.push(dm[2]); continue; }
+      if(/^#{1,6}\s*/.test(line)){ flushSection(); cur={h:line.replace(/^#{1,6}\s*/,"").trim(), body:[]}; continue; }
+      if(line===""){ flushPara(); continue; }
+      if(!cur){ cur={h:"", body:[]}; }
+      buf.push(line);
+    }
+    flushSection();
+    return { sections:sections, decl:declBuf.join(" ").replace(/\s+/g," ").trim() };
+  }
+  function serializeContract(m){
+    var out=[], secs=(m&&m.sections)||[], i, p;
+    for(i=0;i<secs.length;i++){
+      var s=secs[i];
+      if(s.h){ out.push("# "+s.h); out.push(""); }
+      var body=s.body||[];
+      for(p=0;p<body.length;p++){ out.push(body[p]); out.push(""); }
+    }
+    out.push("DECLARATION:");
+    out.push((m&&m.decl)||"");
+    return out.join("\n").replace(/\n{3,}/g,"\n\n").replace(/^\n+/,"").replace(/\s+$/,"")+"\n";
+  }
+
   /* -- UI strings -- */
   var UI={
     en:{ brandSub:"Consent \u00b7 Photo / Video", pageTitle:"Subject Consent", pageSubtitle:"Photography / Videography",
@@ -875,7 +949,12 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       submit:"Submit", fillReq:"Complete the required fields.",
       confirmNew:"Tap \u21ba again to clear the form", cleared:"New form \u2014 ready.",
       settings:"Settings", settingsSub:"These values fill the consent text and the document header.",
-      sProject:"Project / organisation using the images", sProducer:"Production company (credit)", sRef:"Reference prefix",
+      sProject:"Project name", sProducer:"Production company (credit)", sRef:"Reference prefix",
+      sContract:"Contract text",
+      sContractHint:"Modify the text below. A line starting with “ # ” is a section title, a blank line starts a new paragraph, and “DECLARATION:” marks the final declaration. Use {PROJECT} where the project name should appear.",
+      importTpl:"Import a template (.txt / .md)", resetContract:"Default text",
+      oldName:"Old name to replace (optional)",
+      oldNameHint:"On import (or on save), this name is replaced by {PROJECT} so the contract stays dynamic.",
       cancel:"Cancel", save:"Save", resetDefault:"Reset to default",
       need:"Missing:", vName:"name", vEmail:"email", vAddress:"street address", vCity:"city", vCountry:"country", vPhoto:"photo", vSig:"signature",
       ready:"Ready \u2014 tap Submit to generate the PDF.", done:"PDF generated \u2713",
@@ -893,7 +972,12 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       submit:"Envoyer", fillReq:"Compl\u00e9tez les champs requis.",
       confirmNew:"Appuyez encore sur \u21ba pour r\u00e9initialiser", cleared:"Nouveau formulaire \u2014 pr\u00eat.",
       settings:"Param\u00e8tres", settingsSub:"Ces valeurs remplissent le texte de consentement et l'en-t\u00eate du document.",
-      sProject:"Projet / organisation qui utilise les images", sProducer:"Bo\u00eete de production (cr\u00e9dit)", sRef:"Pr\u00e9fixe de r\u00e9f\u00e9rence",
+      sProject:"Nom du projet", sProducer:"Bo\u00eete de production (cr\u00e9dit)", sRef:"Pr\u00e9fixe de r\u00e9f\u00e9rence",
+      sContract:"Texte du contrat",
+      sContractHint:"Modifiez le texte ci-dessous. Une ligne commen\u00e7ant par \u00ab # \u00bb est un titre de section, une ligne vide commence un nouveau paragraphe, et \u00ab DECLARATION: \u00bb marque la d\u00e9claration finale. Utilisez {PROJECT} l\u00e0 o\u00f9 le nom du projet doit appara\u00eetre.",
+      importTpl:"Importer un mod\u00e8le (.txt / .md)", resetContract:"Texte par d\u00e9faut",
+      oldName:"Ancien nom \u00e0 remplacer (optionnel)",
+      oldNameHint:"\u00c0 l'import (ou \u00e0 l'enregistrement), ce nom est remplac\u00e9 par {PROJECT} pour que le contrat reste dynamique.",
       cancel:"Annuler", save:"Enregistrer", resetDefault:"Texte par d\u00e9faut",
       need:"Manquant :", vName:"nom", vEmail:"email", vAddress:"adresse", vCity:"ville", vCountry:"pays", vPhoto:"photo", vSig:"signature",
       ready:"Pr\u00eat \u2014 appuyez sur Envoyer pour g\u00e9n\u00e9rer le PDF.", done:"PDF g\u00e9n\u00e9r\u00e9 \u2713",
@@ -906,14 +990,21 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
   /* -- state -- */
   var lang=sget("cf_lang",(window.APP_LANG||"en"));
-  var texts={ en:null, fr:null };
+  var model={ en:null, fr:null };
   var photoDataUrl=null;
   var editing=false;
   var sigHasInk=false;
 
   function loadTexts(){
-    texts.en=assign(assign({},defTexts("en")), sget("cf_texts_en",{}));
-    texts.fr=assign(assign({},defTexts("fr")), sget("cf_texts_fr",{}));
+    var L=["en","fr"];
+    for(var i=0;i<L.length;i++){
+      var raw=sget("cf_contract_"+L[i], null);
+      model[L[i]] = (raw==null) ? legacyToModel(L[i]) : parseContract(raw);
+    }
+  }
+  function applyContract(lg, text){
+    model[lg]=parseContract(text);
+    sset("cf_contract_"+lg, serializeContract(model[lg]));
   }
   function projVal(){ return settings.project||""; }
   function fill(s){ return rep(rep(String(s==null?"":s),"{PROJECT}",projVal()),"{PRODUCER}",settings.producer||"DDC"); }
@@ -931,14 +1022,14 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     renderConsent();
   }
   function renderConsent(){
-    var tx=texts[lang], v=$("consentView"); v.innerHTML="";
+    var m=model[lang], v=$("consentView"); v.innerHTML="";
     function add(tag,cls,txt){ var e=document.createElement(tag); if(cls)e.className=cls; e.textContent=txt; v.appendChild(e); }
-    var groups=[["s1h","s1"],["s2h","s2"],["s3h","s3"],["s4h","s4"],["s5h","s5"]];
-    for(var g=0;g<groups.length;g++){
-      add("h3","",fill(tx[groups[g][0]]));
-      var arr=tx[groups[g][1]]; for(var p=0;p<arr.length;p++){ add("p","",fill(arr[p])); }
+    var secs=m.sections||[];
+    for(var g=0;g<secs.length;g++){
+      if(secs[g].h) add("h3","",fill(secs[g].h));
+      var arr=secs[g].body||[]; for(var p=0;p<arr.length;p++){ add("p","",fill(arr[p])); }
     }
-    add("p","decl",fill(tx.decl));
+    if(m.decl) add("p","decl",fill(m.decl));
   }
   function renderLangList(){
     var box=$("langList"); if(box.getAttribute("data-built")==="1"){ return; }
@@ -958,37 +1049,18 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     return "";
   }
 
-  /* -- edit consent -- */
+  /* -- edit consent (single textarea, shares the model with Settings) -- */
   function buildEditPanel(){
-    var tx=texts[lang], p=$("editPanel"); p.innerHTML="";
-    var hint=document.createElement("div"); hint.className="hint"; hint.style.margin="0 0 6px"; hint.textContent=t("editHint"); p.appendChild(hint);
-    var fields=[["s1h","Consent (title)"],["s1_0","Consent \u00b61"],["s1_1","Consent \u00b62"],
-      ["s2h","Storage (title)"],["s2_0","Storage \u00b61"],
-      ["s3h","Usage (title)"],["s3_0","Usage \u00b61"],["s3_1","Usage \u00b62"],
-      ["s4h","Data requests (title)"],["s4_0","Data requests \u00b61"],
-      ["s5h","Complaints (title)"],["s5_0","Complaints \u00b61"],
-      ["decl","Declaration"]];
-    for(var i=0;i<fields.length;i++){
-      var key=fields[i][0];
-      var lab=document.createElement("label"); lab.textContent=fields[i][1]; p.appendChild(lab);
-      var ta=document.createElement("textarea"); ta.id="ed_"+key;
-      ta.value = getKey(tx,key);
-      p.appendChild(ta);
-    }
+    var p=$("editPanel"); p.innerHTML="";
+    var hint=document.createElement("div"); hint.className="hint"; hint.style.margin="0 0 6px"; hint.textContent=t("sContractHint"); p.appendChild(hint);
+    var ta=document.createElement("textarea"); ta.id="ed_contract"; ta.style.minHeight="320px"; ta.value=serializeContract(model[lang]);
+    p.appendChild(ta);
     var act=document.createElement("div"); act.className="actions";
-    var reset=document.createElement("button"); reset.type="button"; reset.className="btn ghost"; reset.textContent=t("resetDefault");
+    var reset=document.createElement("button"); reset.type="button"; reset.className="btn ghost"; reset.textContent=t("resetContract");
     reset.addEventListener("click", resetText);
     var save=document.createElement("button"); save.type="button"; save.className="btn primary"; save.style.flex="1"; save.textContent=t("save");
     save.addEventListener("click", saveText);
     act.appendChild(reset); act.appendChild(save); p.appendChild(act);
-  }
-  function getKey(tx,key){
-    if(key.indexOf("_")>-1){ var pa=key.split("_"); return tx[pa[0]][parseInt(pa[1],10)]||""; }
-    return tx[key]||"";
-  }
-  function setKey(tx,key,val){
-    if(key.indexOf("_")>-1){ var pa=key.split("_"); tx[pa[0]][parseInt(pa[1],10)]=val; }
-    else tx[key]=val;
   }
   function toggleEdit(){
     editing=!editing;
@@ -997,20 +1069,20 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     $("consentView").style.display = editing?"none":"block";
   }
   function saveText(){
-    var tx=texts[lang];
-    var keys=["s1h","s1_0","s1_1","s2h","s2_0","s3h","s3_0","s3_1","s4h","s4_0","s5h","s5_0","decl"];
-    for(var i=0;i<keys.length;i++){ var el=$("ed_"+keys[i]); if(el) setKey(tx,keys[i],el.value); }
-    sset("cf_texts_"+lang, tx);
+    var el=$("ed_contract"); if(el){ applyContract(lang, el.value); }
     editing=false; $("editPanel").className="edit-panel"; $("consentView").style.display="block";
     applyUI();
   }
   function resetText(){
-    texts[lang]=assign({},defTexts(lang)); sset("cf_texts_"+lang, texts[lang]); buildEditPanel();
+    model[lang]=defModel(lang); sset("cf_contract_"+lang, serializeContract(model[lang]));
+    var el=$("ed_contract"); if(el) el.value=serializeContract(model[lang]);
   }
 
   /* -- settings -- */
   function openSettings(){
     $("s_project").value=settings.project; $("s_producer").value=settings.producer; $("s_ref").value=settings.ref;
+    $("s_contract").value=serializeContract(model[lang]);
+    if($("s_oldname")) $("s_oldname").value="";
     $("settingsModal").className="modal open";
   }
   function closeSettings(){ $("settingsModal").className="modal"; }
@@ -1018,7 +1090,26 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     settings.project=($("s_project").value||"").trim()||"\u2014";
     settings.producer=($("s_producer").value||"").trim()||"DDC";
     settings.ref=($("s_ref").value||"").trim()||"DDC";
-    sset("cf_settings", settings); closeSettings(); applyUI(); updateMsg();
+    sset("cf_settings", settings);
+    var ct=$("s_contract")?($("s_contract").value||""):"";
+    var oldn=$("s_oldname")?($("s_oldname").value||"").trim():"";
+    if(oldn){ ct=rep(ct, oldn, "{PROJECT}"); }
+    applyContract(lang, ct);
+    if(editing){ editing=false; $("editPanel").className="edit-panel"; $("consentView").style.display="block"; }
+    closeSettings(); applyUI(); updateMsg();
+  }
+  function onImportTpl(e){
+    var file=e.target.files&&e.target.files[0]; if(!file) return;
+    var reader=new FileReader();
+    reader.onload=function(ev){
+      var txt=String(ev.target.result||"");
+      var oldn=$("s_oldname")?($("s_oldname").value||"").trim():"";
+      if(oldn){ txt=rep(txt, oldn, "{PROJECT}"); }
+      if($("s_contract")) $("s_contract").value=txt;
+    };
+    reader.onerror=function(){ showDiag("template read error"); };
+    reader.readAsText(file);
+    try{ e.target.value=""; }catch(err){}
   }
 
   /* -- photo -- */
@@ -1209,20 +1300,20 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     var lib = window.jspdf && window.jspdf.jsPDF;
     var gen = window.PDFGEN2 && window.PDFGEN2.generateConsentPDF;
     if(!lib || !gen){ showDiag("PDF library not loaded"); return; }
-    var tx=texts[lang], U=UI[lang];
+    var U=UI[lang];
     var first=$("f_first").value.trim(), last=$("f_last").value.trim();
     var country = $("f_country").value; if(country==="Please Select") country="\u2014";
+    var srcSecs=(model[lang].sections||[]), outSecs=[];
+    for(var si=0;si<srcSecs.length;si++){
+      var b=srcSecs[si].body||[], ob=[];
+      for(var bj=0;bj<b.length;bj++){ ob.push(fill(b[bj])); }
+      outSecs.push({h:fill(srcSecs[si].h||""), body:ob});
+    }
     var data={
       lang:lang, project:projVal(), producer:settings.producer, ref:refCode(), singlePage:true,
       logo:(window.DDC_LOGO_Y||null), logoAR:(window.APP_LOGO_AR||null),
-      sections:[
-        {h:fill(tx.s1h), body:[fill(tx.s1[0]), fill(tx.s1[1])]},
-        {h:fill(tx.s2h), body:[fill(tx.s2[0])]},
-        {h:fill(tx.s3h), body:[fill(tx.s3[0]), fill(tx.s3[1])]},
-        {h:fill(tx.s4h), body:[fill(tx.s4[0])]},
-        {h:fill(tx.s5h), body:[fill(tx.s5[0])]}
-      ],
-      decl:fill(tx.decl),
+      sections:outSecs,
+      decl:fill(model[lang].decl),
       labels:{ title:U.title, subtitlePre:U.subtitlePre, headRight:fill(U.headRight), footL:fill(U.footL),
         ref:U.refLbl, page:U.page, name:U.lName, email:U.lEmail, address:U.lAddress, country:U.lCountry,
         phone:U.lPhone, photo:U.lPhoto, sig:U.lSig,
@@ -1287,6 +1378,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       $("btnSettings").addEventListener("click",openSettings);
       $("btnCancelSettings").addEventListener("click",closeSettings);
       $("btnSaveSettings").addEventListener("click",saveSettings);
+      if($("tplInput")) $("tplInput").addEventListener("change",onImportTpl);
+      if($("btnResetContract")) $("btnResetContract").addEventListener("click",function(){ if($("s_contract")) $("s_contract").value=serializeContract(defModel(lang)); });
       $("btnEdit").addEventListener("click",toggleEdit);
       $("btnClearSig").addEventListener("click",clearSig);
       $("btnGen").addEventListener("click",generate);
